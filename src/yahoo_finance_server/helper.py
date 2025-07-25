@@ -12,6 +12,25 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Trading Bot Specific Configuration
+INDIAN_MARKET_SUFFIX = ".NS"
+NSE_TRADING_HOURS = {
+    "start": "09:15",
+    "end": "15:30"
+}
+
+# Enhanced sector mapping for Indian markets
+INDIAN_SECTOR_ETFS = {
+    'Banking': ['BANKBEES.NS', 'NIFTYBEES.NS'],
+    'IT': ['ITBEES.NS'],
+    'Auto': ['AUTOBEES.NS'],
+    'Pharma': ['PHARMABEES.NS'],
+    'Energy': ['ENERGYBEES.NS'],
+    'Metal': ['METALBEES.NS'],
+    'FMCG': ['FMCGBEES.NS'],
+    'Realty': ['REALTYBEES.NS']
+}
+
 
 def _get_proxy_config() -> Optional[Dict[str, str]]:
     """
@@ -1183,3 +1202,250 @@ def _test_proxy_connectivity():
 # Test proxy connectivity on startup
 if _get_proxy_config():
     _test_proxy_connectivity()
+
+
+# Trading Bot Specific Functions
+
+async def get_indian_market_status() -> Dict[str, Any]:
+    """
+    Get Indian market (NSE) status and trading hours information.
+    
+    Returns:
+        Market status information including current time, market open/close status
+    """
+    try:
+        # Get current IST time
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        current_time = datetime.now(ist)
+        
+        # Check if market is open (simplified logic)
+        current_hour_min = current_time.strftime("%H:%M")
+        is_market_open = (
+            NSE_TRADING_HOURS["start"] <= current_hour_min <= NSE_TRADING_HOURS["end"]
+            and current_time.weekday() < 5  # Monday = 0, Friday = 4
+        )
+        
+        return {
+            "current_time_ist": current_time.isoformat(),
+            "is_market_open": is_market_open,
+            "trading_hours": NSE_TRADING_HOURS,
+            "next_open": "Next trading day 09:15 IST" if not is_market_open else None,
+            "market": "NSE"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting Indian market status: {e}")
+        raise Exception(f"Failed to get market status: {str(e)}")
+
+
+async def get_nse_sector_performance() -> Dict[str, Any]:
+    """
+    Get sector performance data for NSE using sector ETFs.
+    
+    Returns:
+        Sector performance data optimized for trading decisions
+    """
+    try:
+        def _get_sector_data():
+            sector_performance = {}
+            
+            for sector, etfs in INDIAN_SECTOR_ETFS.items():
+                try:
+                    # Use primary ETF for sector performance
+                    primary_etf = etfs[0]
+                    ticker = yf.Ticker(primary_etf)
+                    
+                    # Get recent data (last 5 days)
+                    hist_data = ticker.history(period="5d", interval="1d")
+                    
+                    if not hist_data.empty:
+                        latest_close = hist_data['Close'].iloc[-1]
+                        prev_close = hist_data['Close'].iloc[-2] if len(hist_data) > 1 else latest_close
+                        
+                        daily_change = ((latest_close - prev_close) / prev_close) * 100
+                        volume_ratio = hist_data['Volume'].iloc[-1] / hist_data['Volume'].mean()
+                        
+                        sector_performance[sector] = {
+                            "daily_change_percent": round(daily_change, 2),
+                            "volume_ratio": round(volume_ratio, 2),
+                            "latest_price": round(latest_close, 2),
+                            "etf_symbol": primary_etf,
+                            "momentum_score": round(daily_change * volume_ratio, 2)
+                        }
+                    
+                except Exception as e:
+                    logger.warning(f"Error getting data for sector {sector}: {e}")
+                    continue
+            
+            return sector_performance
+        
+        # Run in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        sector_data = await loop.run_in_executor(None, _get_sector_data)
+        
+        # Sort by momentum score
+        sorted_sectors = dict(sorted(
+            sector_data.items(), 
+            key=lambda x: x[1]['momentum_score'], 
+            reverse=True
+        ))
+        
+        return {
+            "sectors": sorted_sectors,
+            "top_performing_sector": list(sorted_sectors.keys())[0] if sorted_sectors else None,
+            "analysis_time": datetime.now().isoformat(),
+            "market": "NSE"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting NSE sector performance: {e}")
+        raise Exception(f"Failed to get sector performance: {str(e)}")
+
+
+async def get_enhanced_ticker_info_for_trading(symbol: str) -> Dict[str, Any]:
+    """
+    Get enhanced ticker information optimized for trading decisions.
+    Includes additional metrics useful for the F.A.S.T. trading bot.
+    
+    Args:
+        symbol: Stock symbol (automatically adds .NS for Indian stocks if needed)
+        
+    Returns:
+        Enhanced ticker information with trading-specific metrics
+    """
+    try:
+        # Add NSE suffix if not present and appears to be Indian stock
+        if not symbol.endswith('.NS') and not symbol.endswith('.BO') and len(symbol) <= 10:
+            symbol = f"{symbol}.NS"
+        
+        def _get_enhanced_info():
+            ticker = yf.Ticker(symbol)
+            
+            # Get basic info
+            info = ticker.info
+            
+            # Get recent price data for technical analysis
+            hist_data = ticker.history(period="30d", interval="1d")
+            
+            enhanced_info = info.copy()
+            
+            if not hist_data.empty:
+                # Calculate additional trading metrics
+                current_price = hist_data['Close'].iloc[-1]
+                sma_20 = hist_data['Close'].rolling(window=20).mean().iloc[-1]
+                volume_avg = hist_data['Volume'].rolling(window=20).mean().iloc[-1]
+                recent_volume = hist_data['Volume'].iloc[-1]
+                
+                # Price relative to moving average
+                price_vs_sma = ((current_price - sma_20) / sma_20) * 100
+                
+                # Volume surge detection
+                volume_surge = (recent_volume / volume_avg) if volume_avg > 0 else 1
+                
+                # Volatility (ATR approximation)
+                high_low = hist_data['High'] - hist_data['Low']
+                volatility = high_low.rolling(window=14).mean().iloc[-1]
+                atr_percent = (volatility / current_price) * 100
+                
+                # Add trading-specific metrics
+                enhanced_info.update({
+                    "trading_metrics": {
+                        "price_vs_sma20_percent": round(price_vs_sma, 2),
+                        "volume_surge_ratio": round(volume_surge, 2),
+                        "atr_percent": round(atr_percent, 2),
+                        "is_above_sma20": price_vs_sma > 0,
+                        "volume_anomaly": volume_surge > 2.0,
+                        "high_volatility": atr_percent > 3.0
+                    },
+                    "last_updated": datetime.now().isoformat(),
+                    "symbol_normalized": symbol
+                })
+            
+            return enhanced_info
+        
+        # Run in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        enhanced_data = await loop.run_in_executor(None, _get_enhanced_info)
+        
+        return enhanced_data
+        
+    except Exception as e:
+        logger.error(f"Error getting enhanced ticker info for {symbol}: {e}")
+        raise Exception(f"Failed to get enhanced ticker info: {str(e)}")
+
+
+async def get_trading_news_filtered(symbol: str, count: int = 10) -> Dict[str, Any]:
+    """
+    Get news filtered for trading relevance.
+    Filters out noise and focuses on market-moving news.
+    
+    Args:
+        symbol: Stock symbol
+        count: Number of news articles to return
+        
+    Returns:
+        Filtered news with trading relevance scores
+    """
+    try:
+        # Get regular news first
+        news_data = await get_ticker_news(symbol, count * 2)  # Get more to filter
+        
+        if not news_data.get('news'):
+            return news_data
+        
+        # Trading-relevant keywords
+        relevant_keywords = [
+            'earnings', 'revenue', 'profit', 'loss', 'guidance', 'results',
+            'acquisition', 'merger', 'partnership', 'deal', 'contract',
+            'regulatory', 'approval', 'license', 'fda', 'patent',
+            'dividend', 'split', 'buyback', 'debt', 'loan',
+            'outlook', 'forecast', 'upgrade', 'downgrade', 'rating',
+            'expansion', 'facility', 'investment', 'funding',
+            'leadership', 'ceo', 'cfo', 'resignation', 'appointment'
+        ]
+        
+        filtered_news = []
+        for article in news_data['news']:
+            title = article.get('title', '').lower()
+            summary = article.get('summary', '').lower()
+            
+            # Calculate relevance score
+            relevance_score = 0
+            for keyword in relevant_keywords:
+                if keyword in title:
+                    relevance_score += 3
+                elif keyword in summary:
+                    relevance_score += 1
+            
+            # Boost score for recent news
+            try:
+                pub_date = datetime.fromisoformat(article.get('published', ''))
+                hours_old = (datetime.now() - pub_date).total_seconds() / 3600
+                if hours_old < 24:
+                    relevance_score += 2
+                elif hours_old < 48:
+                    relevance_score += 1
+            except:
+                pass
+            
+            article['trading_relevance_score'] = relevance_score
+            if relevance_score > 0:  # Only include relevant news
+                filtered_news.append(article)
+        
+        # Sort by relevance score and limit
+        filtered_news.sort(key=lambda x: x['trading_relevance_score'], reverse=True)
+        filtered_news = filtered_news[:count]
+        
+        return {
+            "symbol": symbol,
+            "news_count": len(filtered_news),
+            "news": filtered_news,
+            "filter_applied": "trading_relevance",
+            "original_count": len(news_data.get('news', [])),
+            "filtered_count": len(filtered_news)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting filtered trading news for {symbol}: {e}")
+        raise Exception(f"Failed to get filtered trading news: {str(e)}")

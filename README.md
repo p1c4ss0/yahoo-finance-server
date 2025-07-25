@@ -1,12 +1,13 @@
-# Yahoo Finance MCP Server
+# F.A.S.T. Trading Bot - Yahoo Finance Server (Fork)
 
-[![Website](https://img.shields.io/badge/Website-🌐-purple)](https://www.agentx.so/mcp/yahoo-finance)
-[![Discord](https://img.shields.io/badge/Discord-Join-7289DA?logo=discord&logoColor=white)](https://discord.gg/dJkAbUq9rU)
+[![Trading Bot](https://img.shields.io/badge/F.A.S.T-Trading%20Bot-blue)](https://github.com/p1c4ss0/trading-bot-yahoo-finance-server)
+[![Original](https://img.shields.io/badge/Original-AgentX--ai-purple)](https://github.com/AgentX-ai/yahoo-finance-server)
 
-📈 **A Model Context Protocol (MCP) server that lets your AI interact with Yahoo Finance** - get comprehensive stock market data, news, financials, and more.
+📈 **Enhanced Yahoo Finance MCP server optimized for the F.A.S.T. Trading Bot** - includes comprehensive stock market data, Indian market optimizations, trading-specific analytics, and filtered news for better trading decisions.
 
 ## ✨ Features
 
+### Original Features
 - 📊 **Stock Data** - Get comprehensive ticker information including company details, financials, and trading metrics
 - 📰 **News Feed** - Fetch recent news articles related to specific stock symbols
 - 🔍 **Search** - Find stocks, ETFs, and other financial instruments with news results
@@ -17,6 +18,15 @@
 - 🌐 **Proxy Support** - Works with HTTP/HTTPS/SOCKS proxies
 - 🚀 **Fast & Async** - Non-blocking operations using asyncio
 - 🔧 **Easy Integration** - Standard MCP protocol for AI assistants
+
+### 🎯 Trading Bot Enhancements
+- 🇮🇳 **Indian Market Status** - Real-time NSE market hours and status monitoring
+- 📊 **NSE Sector Performance** - Sector momentum analysis using ETFs with trading scores
+- 📈 **Enhanced Ticker Info** - Trading-specific metrics including SMA comparison, volume surges, volatility indicators
+- 🎯 **Filtered Trading News** - AI-powered news filtering for trading relevance with scoring
+- ⚡ **Volume Anomaly Detection** - Automated detection of unusual volume spikes
+- 📊 **Technical Indicators** - Built-in SMA, ATR, and momentum calculations
+- 🚨 **Risk Metrics** - Volatility and risk assessment for better position sizing
 
 ## 🚀 Quick Start
 
