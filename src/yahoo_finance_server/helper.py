@@ -9,8 +9,135 @@ import json
 from datetime import datetime, timedelta
 import requests
 import pandas as pd
+import time
+import threading
+from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimiter:
+    """Rate limiter with sliding window and per-domain tracking"""
+    
+    def __init__(self, max_requests_per_minute: int = 60, max_requests_per_second: int = 2):
+        self.max_requests_per_minute = max_requests_per_minute
+        self.max_requests_per_second = max_requests_per_second
+        self.requests = defaultdict(deque)  # domain -> deque of timestamps
+        self.lock = threading.Lock()
+    
+    def can_request(self, domain: str = "default") -> bool:
+        """Check if request is allowed based on rate limits"""
+        with self.lock:
+            now = time.time()
+            domain_requests = self.requests[domain]
+            
+            # Remove old requests (older than 1 minute)
+            while domain_requests and now - domain_requests[0] > 60:
+                domain_requests.popleft()
+            
+            # Check per-minute limit
+            if len(domain_requests) >= self.max_requests_per_minute:
+                return False
+            
+            # Check per-second limit (last 1 second)
+            recent_requests = sum(1 for ts in domain_requests if now - ts <= 1)
+            if recent_requests >= self.max_requests_per_second:
+                return False
+            
+            return True
+    
+    def record_request(self, domain: str = "default"):
+        """Record a request timestamp"""
+        with self.lock:
+            self.requests[domain].append(time.time())
+    
+    def wait_if_needed(self, domain: str = "default") -> float:
+        """Wait if needed to respect rate limits, return wait time"""
+        wait_time = 0
+        while not self.can_request(domain):
+            wait_time += 0.1
+            time.sleep(0.1)
+        return wait_time
+
+
+class CircuitBreaker:
+    """Circuit breaker pattern to handle 429 errors and other failures"""
+    
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 300, half_open_max_calls: int = 3):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        
+        self.failure_count = defaultdict(int)  # domain -> failure count
+        self.last_failure_time = defaultdict(float)  # domain -> timestamp
+        self.state = defaultdict(str)  # domain -> state (closed, open, half-open)
+        self.half_open_calls = defaultdict(int)  # domain -> half-open call count
+        self.lock = threading.Lock()
+    
+    def can_request(self, domain: str = "default") -> bool:
+        """Check if request is allowed based on circuit breaker state"""
+        with self.lock:
+            now = time.time()
+            current_state = self.state[domain] or "closed"
+            
+            if current_state == "closed":
+                return True
+            elif current_state == "open":
+                # Check if recovery timeout has passed
+                if now - self.last_failure_time[domain] >= self.recovery_timeout:
+                    self.state[domain] = "half-open"
+                    self.half_open_calls[domain] = 0
+                    logger.info(f"Circuit breaker for {domain} transitioning to half-open")
+                    return True
+                return False
+            elif current_state == "half-open":
+                return self.half_open_calls[domain] < self.half_open_max_calls
+            
+            return False
+    
+    def record_success(self, domain: str = "default"):
+        """Record a successful request"""
+        with self.lock:
+            current_state = self.state[domain] or "closed"
+            
+            if current_state == "half-open":
+                self.half_open_calls[domain] += 1
+                if self.half_open_calls[domain] >= self.half_open_max_calls:
+                    # Transition back to closed
+                    self.state[domain] = "closed"
+                    self.failure_count[domain] = 0
+                    logger.info(f"Circuit breaker for {domain} closed - recovered")
+            elif current_state == "closed":
+                # Reset failure count on success
+                if self.failure_count[domain] > 0:
+                    self.failure_count[domain] = max(0, self.failure_count[domain] - 1)
+    
+    def record_failure(self, domain: str = "default", is_rate_limit: bool = False):
+        """Record a failed request"""
+        with self.lock:
+            now = time.time()
+            current_state = self.state[domain] or "closed"
+            
+            self.failure_count[domain] += 1
+            self.last_failure_time[domain] = now
+            
+            # For rate limiting errors, be more aggressive
+            threshold = self.failure_threshold // 2 if is_rate_limit else self.failure_threshold
+            
+            if self.failure_count[domain] >= threshold:
+                if current_state != "open":
+                    self.state[domain] = "open"
+                    logger.warning(f"Circuit breaker for {domain} opened after {self.failure_count[domain]} failures")
+            elif current_state == "half-open":
+                # Failed during half-open, go back to open
+                self.state[domain] = "open"
+                logger.warning(f"Circuit breaker for {domain} reopened after failure during half-open state")
+
+
+# Global instances
+yahoo_rate_limiter = RateLimiter(max_requests_per_minute=30, max_requests_per_second=1)
+yahoo_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=120)
+
 
 # Trading Bot Specific Configuration
 INDIAN_MARKET_SUFFIX = ".NS"
@@ -141,61 +268,65 @@ def _setup_yfinance_session():
     except Exception as e:
         logger.warning(f"Could not apply enhanced session to yfinance: {e}")
 
-
-def _get_enhanced_session():
-    """
-    Get a requests session with enhanced headers and proxy configuration.
-    This should be used for all direct API calls instead of requests.get().
-    """
-    session = requests.Session()
-
-    # Add realistic headers optimized for residential proxies like Oxylabs
-    session.headers.update(
-        {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-            "DNT": "1",
-        }
-    )
-
-    # Apply proxy configuration if available
-    proxy_config = _get_proxy_config()
-    if proxy_config:
-        session.proxies.update(proxy_config)
-        logger.debug(
-            f"Enhanced session created with proxy: {list(proxy_config.keys())}"
-        )
-
-        # Set longer timeout for proxy connections
-        session.timeout = 30
-
-        # Enable session persistence for better performance with residential proxies
-        session.mount(
-            "http://",
-            requests.adapters.HTTPAdapter(
-                max_retries=3, pool_connections=10, pool_maxsize=10
-            ),
-        )
-        session.mount(
-            "https://",
-            requests.adapters.HTTPAdapter(
-                max_retries=3, pool_connections=10, pool_maxsize=10
-            ),
-        )
-
-    else:
-        logger.debug("Enhanced session created without proxy")
-
     return session
+
+
+def _make_rate_limited_request(url: str, params: Optional[Dict] = None, domain: str = "yahoo-finance", 
+                             max_retries: int = 3, backoff_factor: float = 1.0) -> Optional[requests.Response]:
+    """Make a rate-limited request with circuit breaker protection"""
+    
+    for attempt in range(max_retries):
+        # Check circuit breaker
+        if not yahoo_circuit_breaker.can_request(domain):
+            logger.warning(f"Circuit breaker open for {domain} - skipping request")
+            return None
+        
+        # Apply rate limiting
+        wait_time = yahoo_rate_limiter.wait_if_needed(domain)
+        if wait_time > 0:
+            logger.debug(f"Rate limited - waited {wait_time:.2f}s for {domain}")
+        
+        yahoo_rate_limiter.record_request(domain)
+        
+        try:
+            session = _get_enhanced_session()
+            response = session.get(url, params=params, timeout=15)
+            
+            # Check response status
+            if response.status_code == 200:
+                yahoo_circuit_breaker.record_success(domain)
+                return response
+            elif response.status_code == 429:
+                # Rate limited by server
+                logger.warning(f"429 Too Many Requests for {domain} on attempt {attempt + 1}")
+                yahoo_circuit_breaker.record_failure(domain, is_rate_limit=True)
+                
+                # Exponential backoff
+                sleep_time = backoff_factor * (2 ** attempt)
+                logger.info(f"Backing off for {sleep_time}s due to 429 error")
+                time.sleep(sleep_time)
+                continue
+            else:
+                # Other HTTP error
+                logger.warning(f"HTTP {response.status_code} for {domain}: {response.text[:200]}")
+                yahoo_circuit_breaker.record_failure(domain)
+                
+                if attempt < max_retries - 1:
+                    sleep_time = backoff_factor * (2 ** attempt)
+                    time.sleep(sleep_time)
+                continue
+                
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Request exception for {domain} on attempt {attempt + 1}: {str(e)}")
+            yahoo_circuit_breaker.record_failure(domain)
+            
+            if attempt < max_retries - 1:
+                sleep_time = backoff_factor * (2 ** attempt)
+                time.sleep(sleep_time)
+            continue
+    
+    logger.error(f"All {max_retries} attempts failed for {domain}")
+    return None
 
 
 # Initialize session with proxy support
@@ -301,23 +432,21 @@ async def get_ticker_news(symbol: str, count: int = 10) -> Dict[str, Any]:
                         "enableEnhancedTrivialQuery": True,
                     }
 
-                    # Use enhanced session for consistent proxy and headers
-                    session = _get_enhanced_session()
-                    response = session.get(
-                        news_url,
-                        params=params,
-                        timeout=10,
-                    )
-                    response.raise_for_status()
-
-                    data = response.json()
-                    if "news" in data:
-                        news = data["news"]
-                        logger.info(
-                            f"Method 2 - direct API returned {len(news)} articles"
-                        )
+                    # Use rate-limited request to prevent 429 errors
+                    response = _make_rate_limited_request(news_url, params=params, domain="yahoo-finance-news")
+                    
+                    if not response:
+                        logger.warning(f"Rate-limited request failed for {symbol}")
+                        news = []  # Set empty news and let method continue
                     else:
-                        logger.info("Method 2 - no news found in API response")
+                        data = response.json()
+                        if "news" in data:
+                            news = data["news"]
+                            logger.info(
+                                f"Method 2 - direct API returned {len(news)} articles"
+                            )
+                        else:
+                            logger.info("Method 2 - no news found in API response")
 
                 except Exception as e:
                     logger.warning(f"Method 2 failed for {symbol}: {e}")
@@ -488,10 +617,12 @@ async def search_yahoo_finance(query: str, count: int = 10) -> Dict[str, Any]:
                         "enableEnhancedTrivialQuery": True,
                     }
 
-                    # Use enhanced session for consistent proxy and headers
-                    session = _get_enhanced_session()
-                    response = session.get(search_url, params=params)
-                    response.raise_for_status()
+                    # Use rate-limited request to prevent 429 errors
+                    response = _make_rate_limited_request(search_url, params=params, domain="yahoo-finance-search")
+                    
+                    if not response:
+                        logger.warning(f"Rate-limited search request failed for query: {query}")
+                        return []
 
                     data = response.json()
 
