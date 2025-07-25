@@ -136,9 +136,9 @@ class CircuitBreaker:
 
 
 # Global instances - Yahoo Finance has no official API limits but aggressive anti-scraping
-# Based on research: Conservative limits to avoid 429 errors
-yahoo_rate_limiter = RateLimiter(max_requests_per_minute=15, max_requests_per_second=0.5)
-yahoo_circuit_breaker = CircuitBreaker(failure_threshold=2, recovery_timeout=300)
+# Based on research and 429 errors: Very conservative limits to avoid IP blocking
+yahoo_rate_limiter = RateLimiter(max_requests_per_minute=8, max_requests_per_second=0.25)
+yahoo_circuit_breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=600)
 
 
 # Trading Bot Specific Configuration
