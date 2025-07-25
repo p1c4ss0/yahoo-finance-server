@@ -11,6 +11,7 @@ import requests
 import pandas as pd
 import time
 import threading
+import random
 from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
@@ -134,9 +135,10 @@ class CircuitBreaker:
                 logger.warning(f"Circuit breaker for {domain} reopened after failure during half-open state")
 
 
-# Global instances
-yahoo_rate_limiter = RateLimiter(max_requests_per_minute=30, max_requests_per_second=1)
-yahoo_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=120)
+# Global instances - Yahoo Finance has no official API limits but aggressive anti-scraping
+# Based on research: Conservative limits to avoid 429 errors
+yahoo_rate_limiter = RateLimiter(max_requests_per_minute=15, max_requests_per_second=0.5)
+yahoo_circuit_breaker = CircuitBreaker(failure_threshold=2, recovery_timeout=300)
 
 
 # Trading Bot Specific Configuration
@@ -182,6 +184,71 @@ def _get_proxy_config() -> Optional[Dict[str, str]]:
         logger.info(f"Using proxy: {masked_url}")
         return {"http": proxy_url, "https": proxy_url}
     return None
+
+
+def _get_enhanced_session():
+    """
+    Get a requests session with enhanced headers and proxy configuration.
+    This should be used for all direct API calls instead of requests.get().
+    """
+    session = requests.Session()
+
+    # Rotate User-Agent to appear more diverse and avoid detection
+    user_agents = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
+    
+    # Add realistic headers optimized for residential proxies like Oxylabs
+    session.headers.update(
+        {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "DNT": "1",
+        }
+    )
+
+    # Apply proxy configuration if available
+    proxy_config = _get_proxy_config()
+    if proxy_config:
+        session.proxies.update(proxy_config)
+        logger.debug(
+            f"Enhanced session created with proxy: {list(proxy_config.keys())}"
+        )
+
+        # Set longer timeout for proxy connections
+        session.timeout = 30
+
+        # Enable session persistence for better performance with residential proxies
+        session.mount(
+            "http://",
+            requests.adapters.HTTPAdapter(
+                max_retries=3, pool_connections=10, pool_maxsize=10
+            ),
+        )
+        session.mount(
+            "https://",
+            requests.adapters.HTTPAdapter(
+                max_retries=3, pool_connections=10, pool_maxsize=10
+            ),
+        )
+
+    else:
+        logger.info("No proxy configuration found - using direct connection")
+
+    return session
 
 
 def _setup_yfinance_session():
@@ -272,7 +339,7 @@ def _setup_yfinance_session():
 
 
 def _make_rate_limited_request(url: str, params: Optional[Dict] = None, domain: str = "yahoo-finance", 
-                             max_retries: int = 3, backoff_factor: float = 1.0) -> Optional[requests.Response]:
+                             max_retries: int = 2, backoff_factor: float = 2.0) -> Optional[requests.Response]:
     """Make a rate-limited request with circuit breaker protection"""
     
     for attempt in range(max_retries):
@@ -288,9 +355,13 @@ def _make_rate_limited_request(url: str, params: Optional[Dict] = None, domain: 
         
         yahoo_rate_limiter.record_request(domain)
         
+        # Add small random delay to appear more human-like (0.1-0.5 seconds)
+        human_delay = random.uniform(0.1, 0.5)
+        time.sleep(human_delay)
+        
         try:
             session = _get_enhanced_session()
-            response = session.get(url, params=params, timeout=15)
+            response = session.get(url, params=params, timeout=20)  # Increased timeout
             
             # Check response status
             if response.status_code == 200:
